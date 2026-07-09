@@ -5,6 +5,31 @@ from pydantic import BaseModel, Field, field_validator
 from datetime import date
 
 
+# 这段代码的核心作用是定义整个系统的数据结构“契约”。
+#
+# 可以把它们理解为系统内外部沟通的 “标准用语” 和 “校验规则”，主要服务于三大功能：
+#
+# 1. 定义 API 的请求和响应格式（接口契约）
+# 前后端交互时，数据必须按约定格式传输。这些模型就是“合同”：
+#
+# TripRequest：约定了前端发起旅行规划请求时，必须发送哪些字段（如城市、日期、偏好），以及字段的类型和示例。
+#
+# TripPlanResponse：约定了后端处理后，必须返回什么样的成功/失败结构和数据。
+#
+# 其他如 POISearchResponse、RouteResponse 等，也为具体的 POI 搜索、路线规划等接口定义了统一的输出格式。
+#
+# 2. 自动校验和转换数据（安全与容错）
+# 它们基于 Pydantic，能自动守护数据质量：
+#
+# 校验类型：如果前端误传了 "travel_days": "三天"（应为整数），系统会立刻报错，不会让错误数据进入业务逻辑。
+#
+# 数据清洗：如 WeatherInfo 中的 parse_temperature 方法，会自动将 "28°C" 这样的字符串清洗为整数 28，方便后续计算。
+#
+# 设置默认值与限制：如 travel_days 的 ge=1, le=30 限定了天数范围。
+#
+# 3. 生成 API 文档
+# 你浏览器里看到的清晰文档（http://localhost:8000/docs）正是由这些模型自动生成的。Field(..., description=..., example=...) 里的信息，直接变成了文档里的字段说明和示例。
+
 # ============ 请求模型 ============
 
 class TripRequest(BaseModel):
