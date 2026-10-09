@@ -7,12 +7,12 @@ from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
 # 加载环境变量
-# 首先尝试加载当前目录的.env
-load_dotenv()
+# 首先尝试加载当前目录的.env (override=True 确保覆盖系统环境变量)
+load_dotenv(override=True)
 # 然后尝试加载HelloAgents的.env(如果存在)
 helloagents_env = Path(__file__).parent.parent.parent.parent / "HelloAgents" / ".env"
 if helloagents_env.exists():
-    load_dotenv(helloagents_env, override=False)  # 不覆盖已有的环境变量
+    load_dotenv(helloagents_env, override=True)  # 覆盖已有的环境变量
 
 
 class Settings(BaseSettings):
@@ -30,14 +30,14 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://127.0.0.1:3000"
 
     # 高德地图API配置
-    amap_api_key: str = "74f8938a1272a71fe9891d87657e3d8e"
+    amap_api_key: str = ""
 
     # Unsplash API配置
-    unsplash_access_key: str = "kjuyvZ6uw1UPQVZU_hJbMU0dCgTZcxN031EuY3o_17s"
-    unsplash_secret_key: str = "T76qm11m8Cbu__zvzKfdQlq0pG6AA8zgnFgGDgzCyO4"
+    unsplash_access_key: str = ""
+    unsplash_secret_key: str = ""
 
     # LLM配置 (从环境变量读取,由HelloAgents管理)
-    openai_api_key: str = "c35b1c550b9342d699b3534c9d171e76"
+    openai_api_key: str = ""
     openai_base_url: str = "https://api.deepseek.com/v1"
     openai_model: str = "deepseek-chat"
 
