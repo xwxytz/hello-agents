@@ -16,6 +16,11 @@
           ❌ 取消编辑
         </a-button>
 
+        <!-- 分享按钮：把链接发给别人，对方打开就能看到同一份行程 -->
+        <a-button v-if="!editMode && shareToken" @click="copyShareLink">
+          🔗 复制链接
+        </a-button>
+
         <!-- 导出按钮 -->
         <a-dropdown v-if="!editMode">
           <template #overlay>
@@ -35,7 +40,40 @@
       </a-space>
     </div>
 
-    <div v-if="tripPlan" class="content-wrapper">
+    <!-- 加载骨架屏：读取分享行程时先占住版面，避免"白屏一会儿再整页跳一下" -->
+    <div v-if="loading" class="content-wrapper">
+      <div class="side-nav">
+        <a-skeleton active :paragraph="{ rows: 6 }" />
+      </div>
+      <div class="main-content">
+        <a-card :bordered="false" class="overview-card">
+          <a-skeleton active :paragraph="{ rows: 3 }" />
+        </a-card>
+        <a-card :bordered="false" class="budget-card" style="margin-top: 16px">
+          <a-skeleton active :paragraph="{ rows: 2 }" />
+        </a-card>
+        <a-card :bordered="false" class="days-card" style="margin-top: 16px">
+          <a-skeleton active :paragraph="{ rows: 8 }" />
+        </a-card>
+      </div>
+    </div>
+
+    <!-- 错误边界：读取失败必须给出可操作的出口（重试 / 返回），而不是一片空白 -->
+    <a-result
+      v-else-if="loadError"
+      status="warning"
+      :title="loadError"
+      :sub-title="loadErrorHint"
+    >
+      <template #extra>
+        <a-space>
+          <a-button type="primary" @click="goBack">返回首页创建行程</a-button>
+          <a-button v-if="shareToken" @click="reload">重试</a-button>
+        </a-space>
+      </template>
+    </a-result>
+
+    <div v-else-if="tripPlan" class="content-wrapper">
       <!-- 侧边导航 -->
       <div class="side-nav">
         <a-affix :offset-top="80">
@@ -316,6 +354,8 @@ import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import type { TripPlan } from '@/types'
+import { API_BASE_URL, buildShareUrl, fetchTripByShareToken } from '@/services/api'
+import { canDeleteAttraction, getMealLabel, moveAttractionInPlace } from '@/utils/planEdit'
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
@@ -324,19 +364,88 @@ const originalPlan = ref<TripPlan | null>(null)
 const attractionPhotos = ref<Record<string, string>>({})
 const activeSection = ref('overview')
 const activeDays = ref<number[]>([0]) // 默认展开第一天
+
+// 加载态与错误态：以前这两者都缺——刷新页面（sessionStorage 丢失）或分享链接失效时，
+// 用户看到的是一个空空的"没有找到旅行计划数据"，说不清是没数据还是出错了。
+const loading = ref(false)
+const loadError = ref('')
+const loadErrorHint = ref('')
+const shareToken = ref('')
+
 let map: any = null
 
+/**
+ * 载入行程后统一渲染（图片 + 地图）。
+ * 抽出来的原因：正常读取与「重试」走的是同一条渲染路径，
+ * 写两份迟早会漏掉其中一份。
+ */
+const renderPlan = async (plan: TripPlan) => {
+  tripPlan.value = plan
+  await loadAttractionPhotos()
+  await nextTick()
+  initMap()
+}
+
+const loadFromShare = async (token: string) => {
+  loading.value = true
+  loadError.value = ''
+  try {
+    const record = await fetchTripByShareToken(token)
+    await renderPlan(record.plan)
+  } catch (error: any) {
+    tripPlan.value = null
+    loadError.value = error?.message || '读取分享行程失败'
+    loadErrorHint.value = '链接可能有误、行程已被删除，或后端暂时不可用'
+  } finally {
+    loading.value = false
+  }
+}
+
 onMounted(async () => {
+  // 分享链接优先：直接打开 /result?share=xxx 的人没有本地 sessionStorage
+  const share = new URL(window.location.href).searchParams.get('share')
+  if (share) {
+    shareToken.value = share
+    await loadFromShare(share)
+    return
+  }
+
+  shareToken.value = sessionStorage.getItem('tripShareToken') || ''
+
   const data = sessionStorage.getItem('tripPlan')
-  if (data) {
-    tripPlan.value = JSON.parse(data)
-    // 加载景点图片
-    await loadAttractionPhotos()
-    // 等待DOM渲染完成后初始化地图
-    await nextTick()
-    initMap()
+  if (!data) {
+    loadError.value = '没有可显示的行程'
+    loadErrorHint.value = '行程仅保存在当前标签页，换个标签页或刷新后就找不到了'
+    return
+  }
+
+  try {
+    await renderPlan(JSON.parse(data) as TripPlan)
+  } catch (error) {
+    // 本地缓存被写坏（手工改过 / 版本变更导致结构不兼容）时给出明确出路，
+    // 而不是让页面卡在一个解析失败的白屏上
+    loadError.value = '本地缓存的行程无法解析'
+    loadErrorHint.value = '请返回首页重新生成一次'
   }
 })
+
+const reload = () => {
+  if (shareToken.value) {
+    loadFromShare(shareToken.value)
+  }
+}
+
+const copyShareLink = async () => {
+  if (!shareToken.value) return
+  const url = buildShareUrl(`/result?share=${shareToken.value}`)
+  try {
+    await navigator.clipboard.writeText(url)
+    message.success('分享链接已复制')
+  } catch (error) {
+    // 非 HTTPS / 无剪贴板权限时 clipboard 不可用，退而求其次把链接显示出来
+    message.info(`请手动复制：${url}`)
+  }
+}
 
 const goBack = () => {
   router.push('/')
@@ -391,7 +500,7 @@ const deleteAttraction = (dayIndex: number, attrIndex: number) => {
   if (!tripPlan.value) return
 
   const day = tripPlan.value.days[dayIndex]
-  if (day.attractions.length <= 1) {
+  if (!canDeleteAttraction(day.attractions.length)) {
     message.warning('每天至少需要保留一个景点')
     return
   }
@@ -405,23 +514,7 @@ const moveAttraction = (dayIndex: number, attrIndex: number, direction: 'up' | '
   if (!tripPlan.value) return
 
   const day = tripPlan.value.days[dayIndex]
-  const attractions = day.attractions
-
-  if (direction === 'up' && attrIndex > 0) {
-    [attractions[attrIndex], attractions[attrIndex - 1]] = [attractions[attrIndex - 1], attractions[attrIndex]]
-  } else if (direction === 'down' && attrIndex < attractions.length - 1) {
-    [attractions[attrIndex], attractions[attrIndex + 1]] = [attractions[attrIndex + 1], attractions[attrIndex]]
-  }
-}
-
-const getMealLabel = (type: string): string => {
-  const labels: Record<string, string> = {
-    breakfast: '早餐',
-    lunch: '午餐',
-    dinner: '晚餐',
-    snack: '小吃'
-  }
-  return labels[type] || type
+  moveAttractionInPlace(day.attractions, attrIndex, direction)
 }
 
 // 加载所有景点图片
@@ -432,7 +525,7 @@ const loadAttractionPhotos = async () => {
 
   tripPlan.value.days.forEach(day => {
     day.attractions.forEach(attraction => {
-      const promise = fetch(`http://localhost:8000/api/poi/photo?name=${encodeURIComponent(attraction.name)}`)
+      const promise = fetch(`${API_BASE_URL}/api/poi/photo?name=${encodeURIComponent(attraction.name)}`)
         .then(res => res.json())
         .then(data => {
           if (data.success && data.data.photo_url) {
@@ -787,48 +880,6 @@ const exportAsPDF = async () => {
 }
 
 // 截取地图图片
-const captureMapImage = async () => {
-  if (!map) return
-
-  try {
-    // 获取地图容器
-    const mapContainer = document.getElementById('amap-container')
-    if (!mapContainer) return
-
-    // 使用高德地图的截图功能
-    const mapCanvas = mapContainer.querySelector('canvas')
-    if (mapCanvas) {
-      // 创建一个img元素替换地图容器
-      const img = document.createElement('img')
-      img.src = mapCanvas.toDataURL('image/png')
-      img.style.width = '100%'
-      img.style.height = '500px'
-      img.style.objectFit = 'cover'
-      img.id = 'map-snapshot'
-
-      // 隐藏原地图,显示截图
-      mapContainer.style.display = 'none'
-      mapContainer.parentElement?.appendChild(img)
-    }
-  } catch (error) {
-    console.error('截取地图失败:', error)
-  }
-}
-
-// 恢复地图
-const restoreMap = () => {
-  const mapContainer = document.getElementById('amap-container')
-  const snapshot = document.getElementById('map-snapshot')
-
-  if (mapContainer) {
-    mapContainer.style.display = 'block'
-  }
-
-  if (snapshot) {
-    snapshot.remove()
-  }
-}
-
 // 初始化地图
 const initMap = async () => {
   try {

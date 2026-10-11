@@ -1,15 +1,11 @@
 """地图服务API路由"""
 
+
 from fastapi import APIRouter, HTTPException, Query
-from typing import Optional
-from ...models.schemas import (
-    POISearchRequest,
-    POISearchResponse,
-    RouteRequest,
-    RouteResponse,
-    WeatherResponse
-)
+
+from ...models.schemas import POISearchResponse, RouteRequest, RouteResponse, WeatherResponse
 from ...services.amap_service import get_amap_service
+from ...services.logging_setup import logger
 
 router = APIRouter(prefix="/map", tags=["地图服务"])
 
@@ -20,7 +16,7 @@ router = APIRouter(prefix="/map", tags=["地图服务"])
     summary="搜索POI",
     description="根据关键词搜索POI(兴趣点)"
 )
-async def search_poi(
+def search_poi(
     keywords: str = Query(..., description="搜索关键词", example="故宫"),
     city: str = Query(..., description="城市", example="北京"),
     citylimit: bool = Query(True, description="是否限制在城市范围内")
@@ -50,9 +46,9 @@ async def search_poi(
         )
         
     except Exception as e:
-        print(f"❌ POI搜索失败: {str(e)}")
+        logger.error(f"❌ POI搜索失败: {str(e)}")
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail=f"POI搜索失败: {str(e)}"
         )
 
@@ -63,7 +59,7 @@ async def search_poi(
     summary="查询天气",
     description="查询指定城市的天气信息"
 )
-async def get_weather(
+def get_weather(
     city: str = Query(..., description="城市名称", example="北京")
 ):
     """
@@ -89,9 +85,9 @@ async def get_weather(
         )
         
     except Exception as e:
-        print(f"❌ 天气查询失败: {str(e)}")
+        logger.error(f"❌ 天气查询失败: {str(e)}")
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail=f"天气查询失败: {str(e)}"
         )
 
@@ -102,7 +98,7 @@ async def get_weather(
     summary="规划路线",
     description="规划两点之间的路线"
 )
-async def plan_route(request: RouteRequest):
+def plan_route(request: RouteRequest):
     """
     规划路线
     
@@ -132,9 +128,9 @@ async def plan_route(request: RouteRequest):
         )
         
     except Exception as e:
-        print(f"❌ 路线规划失败: {str(e)}")
+        logger.error(f"❌ 路线规划失败: {str(e)}")
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail=f"路线规划失败: {str(e)}"
         )
 
@@ -144,16 +140,17 @@ async def plan_route(request: RouteRequest):
     summary="健康检查",
     description="检查地图服务是否正常"
 )
-async def health_check():
+def health_check():
     """健康检查"""
     try:
-        # 检查服务是否可用
+        # 检查服务是否可用（首次调用会触发 MCP 工具发现，属同步阻塞，故本路由不用 async def）
         service = get_amap_service()
-        
+        tools = getattr(service.mcp_tool, "_available_tools", None) or []
+
         return {
             "status": "healthy",
             "service": "map-service",
-            "mcp_tools_count": len(service.mcp_tool._available_tools)
+            "mcp_tools_count": len(tools)
         }
     except Exception as e:
         raise HTTPException(

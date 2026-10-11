@@ -207,7 +207,8 @@
 import { ref, reactive, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { generateTripPlan } from '@/services/api'
+import { generateTripPlanStream } from '@/services/api'
+import type { StreamEvent } from '@/services/api'
 import type { TripFormData } from '@/types'
 import type { Dayjs } from 'dayjs'
 
@@ -216,7 +217,12 @@ const loading = ref(false)
 const loadingProgress = ref(0)
 const loadingStatus = ref('')
 
-const formData = reactive<TripFormData & { start_date: Dayjs | null; end_date: Dayjs | null }>({
+// 用 Omit 去掉 TripFormData 里声明为 string 的日期字段：
+// 表单里日期是 Dayjs 对象（提交时才格式化成字符串），直接交叉类型会变成
+// `string & Dayjs`，既不能赋 null 也不能赋 Dayjs，类型检查必然报错
+const formData = reactive<
+  Omit<TripFormData, 'start_date' | 'end_date'> & { start_date: Dayjs | null; end_date: Dayjs | null }
+>({
   city: '',
   start_date: null,
   end_date: null,
@@ -253,24 +259,6 @@ const handleSubmit = async () => {
   loadingProgress.value = 0
   loadingStatus.value = '正在初始化...'
 
-  // 模拟进度更新
-  const progressInterval = setInterval(() => {
-    if (loadingProgress.value < 90) {
-      loadingProgress.value += 10
-
-      // 更新状态文本
-      if (loadingProgress.value <= 30) {
-        loadingStatus.value = '🔍 正在搜索景点...'
-      } else if (loadingProgress.value <= 50) {
-        loadingStatus.value = '🌤️ 正在查询天气...'
-      } else if (loadingProgress.value <= 70) {
-        loadingStatus.value = '🏨 正在推荐酒店...'
-      } else {
-        loadingStatus.value = '📋 正在生成行程计划...'
-      }
-    }
-  }, 500)
-
   try {
     const requestData: TripFormData = {
       city: formData.city,
@@ -283,34 +271,49 @@ const handleSubmit = async () => {
       free_text_input: formData.free_text_input
     }
 
-    const response = await generateTripPlan(requestData)
+    // SSE 流式生成：进度与状态完全由后端事件驱动，不再本地模拟递增
+    let receivedResult = false
 
-    clearInterval(progressInterval)
-    loadingProgress.value = 100
-    loadingStatus.value = '✅ 完成!'
+    await generateTripPlanStream(requestData, (event: StreamEvent) => {
+      if (event.type === 'stage' && event.status === 'start') {
+        loadingStatus.value = event.label || '正在生成...'
+        loadingProgress.value = Math.round((((event.index ?? 1) - 1) / (event.total ?? 1)) * 100)
+      } else if (event.type === 'stage' && event.status === 'end') {
+        loadingProgress.value = Math.round(((event.index ?? 1) / (event.total ?? 1)) * 100)
+      } else if (event.type === 'result') {
+        receivedResult = true
+        loadingProgress.value = 100
+        loadingStatus.value = '✅ 完成!'
+        sessionStorage.setItem('tripPlan', JSON.stringify(event.data))
+        // 后端保存成功会带回分享信息：刷新页面或把链接发给别人时靠它读回行程。
+        // 没有也不影响使用（持久化可能未启用），只是不能分享。
+        if (event.share?.share_token) {
+          sessionStorage.setItem('tripShareToken', event.share.share_token)
+        } else {
+          sessionStorage.removeItem('tripShareToken')
+        }
+        message.success('旅行计划生成成功!')
+        setTimeout(() => {
+          router.push('/result')
+        }, 500)
+      } else if (event.type === 'error') {
+        message.error(event.message || '生成失败')
+      }
+    })
 
-    if (response.success && response.data) {
-      // 保存到sessionStorage
-      sessionStorage.setItem('tripPlan', JSON.stringify(response.data))
-
-      message.success('旅行计划生成成功!')
-
-      // 短暂延迟后跳转
-      setTimeout(() => {
-        router.push('/result')
-      }, 500)
-    } else {
-      message.error(response.message || '生成失败')
+    // 流结束但既没收到结果也没收到错误（连接中断等），需明确提示而非静默回到表单
+    if (!receivedResult) {
+      message.warning('未收到完整行程,请重试')
     }
   } catch (error: any) {
-    clearInterval(progressInterval)
     message.error(error.message || '生成旅行计划失败,请稍后重试')
   } finally {
+    // 延迟重置，避免跳转前进度条闪断
     setTimeout(() => {
       loading.value = false
       loadingProgress.value = 0
       loadingStatus.value = ''
-    }, 1000)
+    }, 800)
   }
 }
 </script>

@@ -93,3 +93,31 @@ export interface TripPlanResponse {
   data?: TripPlan
 }
 
+/** 行程保存后返回的分享信息（后端 P2-3 持久化） */
+export interface TripShareInfo {
+  id: string
+  share_token: string
+  /** 前端分享路径，如 /result?share=xxx */
+  share_path: string
+  city: string
+  created_at?: string
+  /** 仅在创建时返回一次，用于删除；不会出现在分享读取结果里 */
+  manage_token?: string
+}
+
+/** 分享链接读取到的行程存档 */
+export interface TripRecord {
+  id: string
+  share_token: string
+  share_path: string
+  city: string
+  start_date: string
+  end_date: string
+  travel_days: number
+  model?: string
+  created_at?: string
+  view_count?: number
+  request: TripFormData
+  plan: TripPlan
+}
+

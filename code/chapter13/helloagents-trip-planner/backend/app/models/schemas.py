@@ -1,9 +1,10 @@
 """数据模型定义"""
 
-from typing import List, Optional, Union
-from pydantic import BaseModel, Field, field_validator
-from datetime import date
+from typing import Any, Dict, List, Optional, Union
 
+from pydantic import BaseModel, Field, field_validator
+
+from ..services.logging_setup import logger
 
 # 这段代码的核心作用是定义整个系统的数据结构“契约”。
 #
@@ -42,7 +43,50 @@ class TripRequest(BaseModel):
     accommodation: str = Field(..., description="住宿偏好", example="经济型酒店")
     preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
     free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
-    
+
+    @field_validator("city", "transportation", "accommodation")
+    @classmethod
+    def _reject_overlong_short_text(cls, v: str) -> str:
+        """
+        城市/交通/住宿这类短文本超长，基本只有两种来源：误用或构造输入。
+        它们会被拼进 prompt，不限长度等于把 token 消耗权交给调用方，因此直接拒绝而不是截断。
+        """
+        v = (v or "").strip()
+        if len(v) > 50:
+            raise ValueError(f"长度不能超过 50 个字符（当前 {len(v)}）")
+        return v
+
+    @field_validator("preferences")
+    @classmethod
+    def _cap_preferences(cls, v: List[str]) -> List[str]:
+        """偏好项会被逐条拼进 prompt，限制条数与单项长度"""
+        if len(v) > 10:
+            raise ValueError(f"偏好标签最多 10 个（当前 {len(v)}）")
+        for item in v:
+            if len(item) > 20:
+                raise ValueError(f"单个偏好标签不能超过 20 个字符：{item[:20]}...")
+        return v
+
+    @field_validator("free_text_input")
+    @classmethod
+    def _truncate_free_text(cls, v: Optional[str]) -> str:
+        """
+        自由文本超长是正常用户行为（不是攻击），直接报错体验太差，所以截断。
+
+        截断会在文本末尾留下可见标记：这部分内容同样会进入 prompt，
+        模型能知道自己拿到的是被截断的内容，而不是"用户就写了这么多"。
+        """
+        from ..config import get_settings
+
+        limit = get_settings().max_text_input_len
+        v = v or ""
+        if len(v) > limit:
+            logger.warning(
+                f"✂️ free_text_input 超长被截断：{len(v)} → {limit} 字符"
+            )
+            return v[:limit] + f"…[输入已截断至{limit}字]"
+        return v
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -175,21 +219,70 @@ class TripPlan(BaseModel):
     budget: Optional[Budget] = Field(default=None, description="预算信息")
 
 
+# ============ 行程存档（P2-3：持久化与分享）============
+
+class TripShareInfo(BaseModel):
+    """行程保存后返回的分享信息"""
+    id: str = Field(..., description="记录ID")
+    share_token: str = Field(..., description="分享令牌（出现在分享链接里）")
+    share_path: str = Field(..., description="前端分享路径，如 /result?share=xxx")
+    city: str = Field(default="", description="城市")
+    created_at: Optional[str] = Field(default=None, description="保存时间")
+    manage_token: Optional[str] = Field(
+        default=None,
+        description="管理令牌（仅创建时返回一次，用于删除；不会出现在分享链接里）",
+    )
+
+
+class TripSaveRequest(BaseModel):
+    """保存一份已生成的行程"""
+    request: TripRequest = Field(..., description="生成该行程时的原始请求")
+    plan: TripPlan = Field(..., description="行程内容")
+
+
+class TripRecordResponse(BaseModel):
+    """行程存档读取响应"""
+    success: bool = Field(..., description="是否成功")
+    message: str = Field(default="", description="消息")
+    data: Optional[Dict[str, Any]] = Field(default=None, description="存档内容（含 request 与 plan）")
+
+
 class TripPlanResponse(BaseModel):
     """旅行计划响应"""
     success: bool = Field(..., description="是否成功")
     message: str = Field(default="", description="消息")
     data: Optional[TripPlan] = Field(default=None, description="旅行计划数据")
+    share: Optional[TripShareInfo] = Field(
+        default=None,
+        description="本次行程的分享信息；持久化未启用或保存失败时为 null（行程本身照常返回）",
+    )
 
 
 class POIInfo(BaseModel):
-    """POI信息"""
+    """
+    POI信息
+
+    字段类型不能只按"理想情况"定义：实测高德 text_search 对部分 POI 返回的
+    `address` 是**空列表**而不是字符串（例如「八达岭长城」），直接按 str 校验会
+    抛 ValidationError，进而让整次检索失败。这里统一做一次宽容转换：
+    列表按非空元素拼接，其他非字符串转字符串，缺失则为空串。
+    """
     id: str = Field(..., description="POI ID")
     name: str = Field(..., description="名称")
     type: str = Field(..., description="类型")
     address: str = Field(..., description="地址")
-    location: Location = Field(..., description="经纬度坐标")
+    location: Optional[Location] = Field(default=None, description="经纬度坐标")
     tel: Optional[str] = Field(default=None, description="电话")
+
+    @field_validator("id", "name", "type", "address", "tel", mode="before")
+    @classmethod
+    def _coerce_str(cls, v):
+        """把上游偶尔返回的非字符串（列表 / None）收敛成字符串"""
+        if v is None:
+            return ""
+        if isinstance(v, (list, tuple)):
+            return " ".join(str(x) for x in v if x not in (None, "", [], {}))
+        return str(v)
 
 
 class POISearchResponse(BaseModel):
@@ -219,6 +312,53 @@ class WeatherResponse(BaseModel):
     success: bool = Field(..., description="是否成功")
     message: str = Field(default="", description="消息")
     data: List[WeatherInfo] = Field(default=[], description="天气信息")
+
+
+# ============ 健康检查 ============
+
+class SubAgentStatus(BaseModel):
+    """子Agent状态"""
+    role: str = Field(..., description="角色标识(attraction/weather/hotel/planner)")
+    name: str = Field(default="", description="Agent名称")
+    tools_count: int = Field(default=0, description="该Agent挂载的工具数量")
+
+
+class MCPStatus(BaseModel):
+    """MCP连接状态（通过工具发现结果判断，不发起真实调用）"""
+    connected: bool = Field(..., description="是否已成功发现子工具")
+    tools_count: int = Field(default=0, description="已展开的子工具数量")
+    transport: Optional[str] = Field(default=None, description="MCP服务器启动命令")
+    note: Optional[str] = Field(default=None, description="补充说明(如未展开时的后果)")
+
+
+class LLMStatus(BaseModel):
+    """LLM配置状态（只读实例信息，不发起请求）"""
+    configured: bool = Field(..., description="LLM实例是否可用")
+    provider: Optional[str] = Field(default=None, description="提供商")
+    model: Optional[str] = Field(default=None, description="模型名")
+
+
+class TripPlannerHealthResponse(BaseModel):
+    """旅行规划服务健康检查响应"""
+    status: str = Field(..., description="healthy / degraded")
+    service: str = Field(default="trip-planner", description="服务标识")
+    agents_count: int = Field(default=0, description="子Agent数量")
+    agents: List[SubAgentStatus] = Field(default=[], description="各子Agent状态")
+    mcp: MCPStatus = Field(..., description="MCP连接状态")
+    llm: LLMStatus = Field(..., description="LLM配置状态")
+    cache_groups: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="外部API缓存分组：每组的服务内条目数/上限/TTL（秒）。尚未初始化时为 null",
+    )
+    structured_output: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "结构化输出统计（进程内计数，重启清零）：plan_total/plan_ok/plan_failed/parse_retry，"
+            "以及 success_rate 与 retry_per_plan——无样本时两者均为 null，不做估计；"
+            "cache 子对象为外部API缓存命中情况（hits/misses/saved_calls/hit_rate）"
+        ),
+    )
+    message: Optional[str] = Field(default=None, description="异常说明")
 
 
 # ============ 错误响应 ============
